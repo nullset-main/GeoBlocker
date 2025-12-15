@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>GeoBlocker Options</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 20px; }
+      label { display:block; margin-top:12px; }
+      input, textarea { width:100%; padding:8px; margin-top:6px; }
+      button { margin-top:12px; padding:8px 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>GeoBlocker Settings</h1>
+    <label>Google API Key (YouTube Data API v3)
+      <input id="apiKey" placeholder="Enter API key" />
+    </label>
+    <label>Blocked countries (comma-separated ISO 3166-1 alpha-2 codes, e.g. CN, RU, IR)
+      <input id="blockedCountries" placeholder="e.g. CN, RU" />
+    </label>
+
+    <label style="margin-top:10px;display:flex;align-items:center;gap:10px;">
+      <input type="checkbox" id="blockNoCountry" />
+      <span>Block channels that do not set a country</span>
+    </label>
+    <div>
+      <button id="saveBtn">Save</button>
+      <span id="status" style="margin-left:12px;color:green"></span>
+    </div>
+    <p style="margin-top:18px;color:#444;">Notes: You must enable the YouTube Data API v3 in your Google Cloud project and supply an API key. The extension queries channel country from channel snippet and compares to the list above.</p>
+    <script src="options.js"></script>
+  </body>
+</html>

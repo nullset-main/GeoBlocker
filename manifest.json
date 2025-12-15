@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "GeoBlocker for YouTube",
+  "version": "0.1.0",
+  "description": "Block YouTube videos whose channel is registered in user-specified countries.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "*://*.youtube.com/*",
+    "https://www.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.youtube.com/*"],
+      "js": ["contentScript.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "GeoBlocker"
+  }
+}
