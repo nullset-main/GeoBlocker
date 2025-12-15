@@ -30,136 +30,27 @@ async function fetchPlaylistItems(playlistId, maxResults, proxyUrl, useProxy, ap
   let remaining = maxResults;
   while (remaining > 0) {
     const thisBatch = Math.min(50, remaining);
+    let json = null;
     if (useProxy && proxyUrl) {
-      const json = await proxyFetch('/playlistItems', { playlistId, maxResults: thisBatch, pageToken }, proxyUrl, apiKey);
-      const items = json.items || [];
-        const settings = await getSettings();
-        const apiKey = settings.apiKey;
-        const blockedList = settings.blocked;
-        const blockIfNoCountry = settings.blockIfNoCountry;
-        const proxyUrl = settings.proxyUrl;
-        const useProxy = settings.useProxy;
-        const playlistMode = settings.playlistMode;
-        const sampleSize = settings.playlistSampleSize;
-        const result = {};
-
-        if (!ids.length) { sendResponse(result); return; }
-        if (!apiKey && !blockIfNoCountry && !useProxy) {
-          ids.forEach(id => { result[id] = { blocked: false, reason: 'no-api-key' }; });
-          sendResponse(result);
-          return;
-        }
-
-        const toFetch = [];
-        for (const id of ids) {
-          const e = playlistCache.get(id);
-          if (e && (now() - e.ts) <= VIDEO_TTL) {
-            // we have channelId cached
-          } else {
-            toFetch.push(id);
-          }
-        }
-
-        try {
-          for (let i = 0; i < toFetch.length; i += 50) {
-            const chunk = toFetch.slice(i, i + 50);
-            let items = [];
-            if (useProxy && proxyUrl) {
-              const json = await proxyFetch('/playlists', { ids: chunk.join(',') }, proxyUrl, apiKey);
-              items = json.items || [];
-            } else {
-              items = await fetchPlaylists(chunk, apiKey);
-            }
-            for (const p of items) {
-              const pid = p.id;
-              const chId = p.snippet && p.snippet.channelId ? p.snippet.channelId : null;
-              playlistCache.set(pid, { channelId: chId, ts: now() });
-            }
-          }
-
-          // For owner-based decision we can reuse channel cache
-          const playlistOwnerIds = Array.from(new Set(ids.map(id => (playlistCache.get(id) || {}).channelId).filter(Boolean)));
-          const channelsToFetch = [];
-          for (const ch of playlistOwnerIds) {
-            const cached = channelCache.get(ch);
-            if (cached && (now() - cached.ts) <= VIDEO_TTL) continue;
-            channelsToFetch.push(ch);
-          }
-
-          // fetch owner channels
-          for (let i = 0; i < channelsToFetch.length; i += 50) {
-            const chunk = channelsToFetch.slice(i, i + 50);
-            let chItems = [];
-            if (useProxy && proxyUrl) {
-              const json = await proxyFetch('/channels', { ids: chunk.join(',') }, proxyUrl, apiKey);
-              chItems = json.items || [];
-            } else {
-              chItems = await fetchChannels(chunk, apiKey);
-            }
-            for (const ch of chItems) {
-              const cid = ch.id;
-              const country = ch.snippet && ch.snippet.country ? String(ch.snippet.country).trim().toUpperCase() : null;
-              channelCache.set(cid, { country, ts: now() });
-            }
-          }
-
-          // Now evaluate per-playlist depending on mode
-          for (const id of ids) {
-            const ent = playlistCache.get(id);
-            const ownerCh = ent ? ent.channelId : null;
-            let ownerBlocked = false;
-            if (ownerCh) {
-              const chEntry = channelCache.get(ownerCh);
-              const country = chEntry ? chEntry.country : null;
-              if (!country) {
-                ownerBlocked = blockIfNoCountry;
-              } else {
-                ownerBlocked = blockedList.includes(String(country).toUpperCase());
-              }
-            }
-
-            // Decide based on mode
-            if (playlistMode === 'owner') {
-              result[id] = ownerBlocked ? { blocked: true, reason: 'blocked-playlist-owner', country: null } : { blocked: false, reason: ownerCh ? 'owner-allowed' : 'playlist-no-channel' };
-              continue;
-            }
-
-            // For other modes we need to sample playlist items
-            const sampleN = sampleSize;
-            const videoIds = await fetchPlaylistItems(id, sampleN, proxyUrl, useProxy, apiKey);
-            let blockedCount = 0;
-            if (videoIds.length) {
-              const videoChecks = await checkVideos(videoIds);
-              for (const vid of videoIds) if (videoChecks[vid] && videoChecks[vid].blocked) blockedCount++;
-            }
-
-            if (playlistMode === 'any_item') {
-              const isBlocked = blockedCount > 0;
-              result[id] = isBlocked ? { blocked: true, reason: 'blocked-sampled-item' } : { blocked: false, reason: 'no-sampled-blocks' };
-              continue;
-            }
-
-            if (playlistMode === 'majority') {
-              const isBlocked = (videoIds.length > 0) && (blockedCount > (videoIds.length / 2));
-              result[id] = isBlocked ? { blocked: true, reason: 'blocked-majority' } : { blocked: false, reason: 'not-majority' };
-              continue;
-            }
-
-            if (playlistMode === 'owner_or_majority') {
-              const majorityBlocked = (videoIds.length > 0) && (blockedCount > (videoIds.length / 2));
-              const isBlocked = ownerBlocked || majorityBlocked;
-              result[id] = isBlocked ? { blocked: true, reason: ownerBlocked ? 'blocked-playlist-owner' : 'blocked-majority' } : { blocked: false, reason: 'allowed' };
-              continue;
-            }
-          }
-        } catch (err) {
-          console.error('GeoBlocker playlist batch error', err);
-          for (const id of ids) result[id] = { blocked: false, reason: 'error' };
-        }
-
-        sendResponse(result);
+      json = await proxyFetch('/playlistItems', { playlistId, maxResults: thisBatch, pageToken }, proxyUrl, apiKey);
+    } else {
+      const url = buildProxyUrl('https://www.googleapis.com', `/youtube/v3/playlistItems`, Object.assign({}, { part: 'snippet', playlistId, maxResults: thisBatch }, pageToken ? { pageToken } : {}, apiKey ? { key: apiKey } : {}));
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error('playlistItems-fetch-failed');
+      json = await resp.json();
+    }
+    const items = (json && json.items) || [];
+    for (const it of items) {
+      const vid = it.snippet && it.snippet.resourceId && it.snippet.resourceId.videoId;
+      if (vid) results.push(vid);
+      if (results.length >= maxResults) break;
+    }
+    pageToken = (json && json.nextPageToken) || null;
+    if (!pageToken) break;
+    remaining = maxResults - results.length;
+  }
+  return results;
 }
-
 async function fetchPlaylists(playlistIds, apiKey) {
   // playlistIds up to 50
   const idsParam = playlistIds.map(encodeURIComponent).join(',');

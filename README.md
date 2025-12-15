@@ -41,6 +41,8 @@ How it works
 
 - The extension now also blocks YouTube playlists (and playlist thumbnails) whose owning channel is in a blocked country. Playlist pages and playlist links are detected and evaluated via the YouTube Data API.
 
+- Playlist blocking modes: you can control how playlists are evaluated in Options. By default the extension uses `owner_or_majority` (block if the playlist owner is blocked OR a majority of sampled playlist items are from blocked channels). You can also choose owner-only, any-sampled-item, or majority-of-sampled-items. The sample size is configurable (default 20).
+
 Notes & limitations
 
 - This implementation uses the channel `snippet.country` field. Many channels don't set a country, so not all videos will be identified.

@@ -52,5 +52,19 @@ app.get('/playlists', async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'fetch-failed' }); }
 });
 
+app.get('/playlistItems', async (req, res) => {
+  try {
+    const playlistId = req.query.playlistId;
+    const maxResults = req.query.maxResults || 20;
+    const pageToken = req.query.pageToken;
+    if (!playlistId) return res.status(400).json({ error: 'missing playlistId' });
+    if (!YT_API_KEY) return res.status(500).json({ error: 'no-key' });
+    let url = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId=${encodeURIComponent(playlistId)}&maxResults=${encodeURIComponent(maxResults)}&key=${encodeURIComponent(YT_API_KEY)}`;
+    if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
+    const json = await proxyFetch(url);
+    res.json(json);
+  } catch (err) { console.error(err); res.status(500).json({ error: 'fetch-failed' }); }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`GeoBlocker proxy listening on ${PORT}`));
