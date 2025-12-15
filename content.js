@@ -1,15 +1,13 @@
 let blockedCountries = [];
+let blockUnknown = false;
 let apiKey = "";
 
-chrome.storage.local.get(['blockedCountries', 'apiKey'], (result) => {
+chrome.storage.local.get(['blockedCountries', 'apiKey', 'blockUnknown'], (result) => {
   blockedCountries = result.blockedCountries || [];
+  blockUnknown = result.blockUnknown || false;
   apiKey = result.apiKey || "";
+  console.log("GeoFilter Loaded. Key present:", !!apiKey);
   if (apiKey) startObserver();
-});
-
-chrome.storage.onChanged.addListener((changes) => {
-  if (changes.blockedCountries) blockedCountries = changes.blockedCountries.newValue;
-  if (changes.apiKey) apiKey = changes.apiKey.newValue;
 });
 
 function startObserver() {
@@ -19,32 +17,36 @@ function startObserver() {
 }
 
 function processContent() {
-  const selector = `
+  const items = document.querySelectorAll(`
     ytd-video-renderer:not(.geo-checked), 
     ytd-playlist-renderer:not(.geo-checked), 
     ytd-rich-item-renderer:not(.geo-checked),
-    ytd-compact-video-renderer:not(.geo-checked),
-    ytd-grid-video-renderer:not(.geo-checked)
-  `;
-  
-  const items = document.querySelectorAll(selector);
+    ytd-compact-video-renderer:not(.geo-checked)
+  `);
 
   items.forEach(item => {
     item.classList.add('geo-checked');
     const info = extractInfo(item);
 
     if (info && apiKey) {
+      // Visual feedback: I am checking this!
+      item.style.outline = "2px solid blue"; 
+
       chrome.runtime.sendMessage({
         action: "checkItem",
         data: info,
         apiKey: apiKey
       }, (response) => {
-        if (chrome.runtime.lastError) return;
-        
-        if (response && response.country) {
-          if (blockedCountries.includes(response.country)) {
-            item.style.display = 'none';
-          }
+        if (!response) return;
+        const country = response.country || "UNKNOWN";
+
+        if (blockedCountries.includes(country) || (blockUnknown && country === "UNKNOWN")) {
+          // Visual feedback: I should block this!
+          item.style.outline = "5px solid red";
+          item.style.backgroundColor = "rgba(255,0,0,0.1)";
+          // item.style.display = 'none'; // UNCOMMENT THIS LATER TO HIDE
+        } else {
+          item.style.outline = "none";
         }
       });
     }
@@ -52,21 +54,18 @@ function processContent() {
 }
 
 function extractInfo(el) {
+  // Try to find the channel link
   const link = el.querySelector('a[href^="/@"], a[href^="/channel/"]');
   if (link) {
     const href = link.getAttribute('href');
-    if (href.includes('/@')) return { type: 'handle', value: href.split('/@')[1].split('/')[0] };
-    if (href.includes('/channel/')) return { type: 'id', value: href.split('/channel/')[1].split('/')[0] };
+    if (href.includes('/@')) return { type: 'handle', value: href.split('/@')[1] };
+    if (href.includes('/channel/')) return { type: 'id', value: href.split('/channel/')[1] };
   }
-
+  // Try to find playlist (Course)
   const pLink = el.querySelector('a[href*="list="]');
   if (pLink) {
-    const href = pLink.getAttribute('href');
-    const pid = new URLSearchParams(href.split('?')[1]).get('list');
-    if (pid && !pid.startsWith('RD') && !pid.startsWith('LL') && !pid.startsWith('WL')) {
-      return { type: 'playlist', value: pid };
-    }
+    const pid = new URLSearchParams(pLink.getAttribute('href').split('?')[1]).get('list');
+    if (pid && pid.length > 5) return { type: 'playlist', value: pid };
   }
-
-  return null; 
+  return null;
 }
