@@ -1,0 +1,15 @@
+{
+  "name": "geoblocker-proxy",
+  "version": "0.1.0",
+  "description": "Simple proxy for YouTube Data API used by GeoBlocker extension",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "node-fetch": "^2.6.7",
+    "express-rate-limit": "^6.7.0"
+  }
+}
