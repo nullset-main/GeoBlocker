@@ -17,12 +17,19 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.url) {
-    statusEl.textContent = 'No active YouTube tab';
+    statusEl.textContent = 'No active tab';
     return;
   }
   const vid = parseVideoIdFromUrl(tab.url);
   if (!vid) {
-    statusEl.textContent = 'Not a YouTube video page';
+    // Not a watch page — ask content script how many blocked thumbnails are on the page
+    chrome.tabs.sendMessage(tab.id, { type: 'countBlocked' }, (resp) => {
+      if (resp && typeof resp.blockedCount === 'number') {
+        statusEl.textContent = `${resp.blockedCount} blocked videos on this page`;
+      } else {
+        statusEl.textContent = 'Not a YouTube video page';
+      }
+    });
     return;
   }
 

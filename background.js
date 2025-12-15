@@ -1,78 +1,270 @@
 // Background service worker: queries YouTube Data API to get channel country
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || message.type !== 'checkVideo') return;
-  const videoId = message.videoId;
-  if (!videoId) {
-    sendResponse({blocked: false, reason: 'no-video-id'});
-    return;
+// Adds simple in-memory caching and supports batch checks for lists (home/search/etc.)
+const VIDEO_TTL = 5 * 60 * 1000; // 5 minutes
+const videoCache = new Map(); // videoId -> { result, ts }
+const channelCache = new Map(); // channelId -> { country, ts }
+const playlistCache = new Map(); // playlistId -> { channelId, ts }
+
+function now() { return Date.now(); }
+
+async function getSettings() {
+  const s = await chrome.storage.sync.get({ apiKey: '', blockedCountries: '', blockIfNoCountry: false });
+  const apiKey = s.apiKey?.trim();
+  const blockIfNoCountry = Boolean(s.blockIfNoCountry);
+  let blocked = [];
+  if (typeof s.blockedCountries === 'string') {
+    blocked = s.blockedCountries.split(',').map(c => c.trim().toUpperCase()).filter(Boolean);
+  } else if (Array.isArray(s.blockedCountries)) {
+    blocked = s.blockedCountries.map(c => String(c).trim().toUpperCase()).filter(Boolean);
+  }
+  return { apiKey, blocked, blockIfNoCountry };
+}
+
+function isVideoCached(id) {
+  const e = videoCache.get(id);
+  if (!e) return false;
+  if (now() - e.ts > VIDEO_TTL) {
+    videoCache.delete(id);
+    return false;
+  }
+  return true;
+}
+
+async function fetchVideos(videoIds, apiKey) {
+  // videoIds up to 50
+  const idsParam = videoIds.map(encodeURIComponent).join(',');
+  const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${idsParam}&key=${encodeURIComponent(apiKey)}`;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error('video-fetch-failed');
+  const data = await resp.json();
+  return data.items || [];
+}
+
+async function fetchChannels(channelIds, apiKey) {
+  const idsParam = channelIds.map(encodeURIComponent).join(',');
+  const url = `https://www.googleapis.com/youtube/v3/channels?part=snippet&id=${idsParam}&key=${encodeURIComponent(apiKey)}`;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error('channel-fetch-failed');
+  const data = await resp.json();
+  return data.items || [];
+}
+
+async function fetchPlaylists(playlistIds, apiKey) {
+  // playlistIds up to 50
+  const idsParam = playlistIds.map(encodeURIComponent).join(',');
+  const url = `https://www.googleapis.com/youtube/v3/playlists?part=snippet&id=${idsParam}&key=${encodeURIComponent(apiKey)}`;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error('playlist-fetch-failed');
+  const data = await resp.json();
+  return data.items || [];
+}
+
+async function checkVideos(videoIds) {
+  const settings = await getSettings();
+  const apiKey = settings.apiKey;
+  const blockedList = settings.blocked;
+  const blockIfNoCountry = settings.blockIfNoCountry;
+
+  const result = {};
+
+  // Fast path: if no api key and not blocking no-country, return allowed for all
+  if (!apiKey && !blockIfNoCountry) {
+    videoIds.forEach(id => { result[id] = { blocked: false, reason: 'no-api-key' }; });
+    return result;
   }
 
-  (async () => {
-    try {
-      const s = await chrome.storage.sync.get({ apiKey: '', blockedCountries: '', blockIfNoCountry: false });
-      const apiKey = s.apiKey?.trim();
-      const blockIfNoCountry = Boolean(s.blockIfNoCountry);
-      let blocked = [];
-      if (typeof s.blockedCountries === 'string') {
-        blocked = s.blockedCountries.split(',').map(c => c.trim().toUpperCase()).filter(Boolean);
-      } else if (Array.isArray(s.blockedCountries)) {
-        blocked = s.blockedCountries.map(c => String(c).trim().toUpperCase()).filter(Boolean);
-      }
+  // Check cache and prepare lists
+  const toFetch = [];
+  for (const id of videoIds) {
+    if (isVideoCached(id)) {
+      result[id] = videoCache.get(id).result;
+    } else {
+      toFetch.push(id);
+    }
+  }
 
-      if (!apiKey && !blockIfNoCountry) {
-        sendResponse({ blocked: false, reason: !apiKey ? 'no-api-key' : 'no-blocked-countries' });
-        return;
-      }
+  try {
+    // Fetch videos in chunks of 50
+    const chunks = [];
+    for (let i = 0; i < toFetch.length; i += 50) chunks.push(toFetch.slice(i, i + 50));
 
-      // Fetch video resource to get channelId
-      const vidResp = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${encodeURIComponent(videoId)}&key=${encodeURIComponent(apiKey)}`);
-      if (!vidResp.ok) {
-        sendResponse({ blocked: false, reason: 'video-fetch-failed' });
-        return;
+    const videoIdToChannel = {};
+    for (const chunk of chunks) {
+      const items = await fetchVideos(chunk, apiKey);
+      for (const it of items) {
+        if (it && it.id && it.snippet && it.snippet.channelId) {
+          videoIdToChannel[it.id] = it.snippet.channelId;
+        }
       }
-      const vidData = await vidResp.json();
-      const items = vidData.items || [];
-      if (!items.length) {
-        sendResponse({ blocked: false, reason: 'video-not-found' });
-        return;
-      }
-      const channelId = items[0].snippet && items[0].snippet.channelId;
-      if (!channelId) {
-        sendResponse({ blocked: false, reason: 'no-channel' });
-        return;
-      }
+    }
 
-      // Fetch channel resource to get country
-      const chResp = await fetch(`https://www.googleapis.com/youtube/v3/channels?part=snippet&id=${encodeURIComponent(channelId)}&key=${encodeURIComponent(apiKey)}`);
-      if (!chResp.ok) {
-        sendResponse({ blocked: false, reason: 'channel-fetch-failed' });
-        return;
+    // collect unique channel ids to fetch
+    const channelIds = Array.from(new Set(Object.values(videoIdToChannel).filter(Boolean)));
+    const channelsToFetch = [];
+    for (const ch of channelIds) {
+      const cached = channelCache.get(ch);
+      if (cached && (now() - cached.ts) <= VIDEO_TTL) continue;
+      channelsToFetch.push(ch);
+    }
+
+    // Fetch channels in chunks
+    for (let i = 0; i < channelsToFetch.length; i += 50) {
+      const chunk = channelsToFetch.slice(i, i + 50);
+      const chItems = await fetchChannels(chunk, apiKey);
+      for (const ch of chItems) {
+        const cid = ch.id;
+        const country = ch.snippet && ch.snippet.country ? String(ch.snippet.country).trim().toUpperCase() : null;
+        channelCache.set(cid, { country, ts: now() });
       }
-      const chData = await chResp.json();
-      const chItems = chData.items || [];
-      if (!chItems.length) {
-        sendResponse({ blocked: false, reason: 'channel-not-found' });
-        return;
+    }
+
+    // Now produce result per video id
+    for (const id of toFetch) {
+      const chId = videoIdToChannel[id];
+      if (!chId) {
+        // video missing or private
+        const r = { blocked: false, reason: 'video-not-found' };
+        videoCache.set(id, { result: r, ts: now() });
+        result[id] = r;
+        continue;
       }
-      // country (if set by channel owner) is usually in snippet.country
-      const country = chItems[0].snippet && chItems[0].snippet.country;
+      const chEntry = channelCache.get(chId);
+      const country = chEntry ? chEntry.country : null;
       if (!country) {
         if (blockIfNoCountry) {
-          sendResponse({ blocked: true, reason: 'blocked-no-country', country: null });
-          return;
+          const r = { blocked: true, reason: 'blocked-no-country', country: null };
+          videoCache.set(id, { result: r, ts: now() });
+          result[id] = r;
+        } else {
+          const r = { blocked: false, reason: 'channel-no-country', country: null };
+          videoCache.set(id, { result: r, ts: now() });
+          result[id] = r;
         }
-        sendResponse({ blocked: false, reason: 'channel-no-country' });
+        continue;
+      }
+      const countryCode = String(country).trim().toUpperCase();
+      const isBlocked = blockedList.includes(countryCode);
+      const r = { blocked: isBlocked, reason: isBlocked ? 'blocked-country' : 'allowed', country: countryCode };
+      videoCache.set(id, { result: r, ts: now() });
+      result[id] = r;
+    }
+
+    // Also include any previously cached results we had
+    for (const id of videoIds) {
+      if (!result[id] && videoCache.has(id)) result[id] = videoCache.get(id).result;
+    }
+  } catch (err) {
+    console.error('GeoBlocker background batch error', err);
+    // fallback: mark everything allowed but note the error
+    for (const id of videoIds) {
+      if (!result[id]) result[id] = { blocked: false, reason: 'error' };
+    }
+  }
+
+  return result;
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || !message.type) return;
+  if (message.type === 'checkVideo') {
+    const id = message.videoId;
+    if (!id) { sendResponse({ blocked: false, reason: 'no-video-id' }); return; }
+    (async () => {
+      const map = await checkVideos([id]);
+      sendResponse(map[id] || { blocked: false, reason: 'no-data' });
+    })();
+    return true;
+  }
+  if (message.type === 'checkVideos') {
+    const ids = Array.isArray(message.videoIds) ? message.videoIds : [];
+    (async () => {
+      const map = await checkVideos(ids);
+      sendResponse(map);
+    })();
+    return true;
+  }
+  if (message.type === 'checkPlaylists') {
+    const ids = Array.isArray(message.playlistIds) ? message.playlistIds : [];
+    (async () => {
+      const settings = await getSettings();
+      const apiKey = settings.apiKey;
+      const blockedList = settings.blocked;
+      const blockIfNoCountry = settings.blockIfNoCountry;
+      const result = {};
+
+      if (!ids.length) { sendResponse(result); return; }
+      if (!apiKey && !blockIfNoCountry) {
+        ids.forEach(id => { result[id] = { blocked: false, reason: 'no-api-key' }; });
+        sendResponse(result);
         return;
       }
 
-      const countryCode = String(country).trim().toUpperCase();
-      const isBlocked = blocked.includes(countryCode);
-      sendResponse({ blocked: isBlocked, reason: isBlocked ? 'blocked-country' : 'allowed', country: countryCode });
-    } catch (err) {
-      console.error('GeoBlocker background error', err);
-      sendResponse({ blocked: false, reason: 'error' });
-    }
-  })();
+      const toFetch = [];
+      for (const id of ids) {
+        const e = playlistCache.get(id);
+        if (e && (now() - e.ts) <= VIDEO_TTL) {
+          // we have channelId cached
+        } else {
+          toFetch.push(id);
+        }
+      }
 
-  return true; // indicate async response
+      try {
+        for (let i = 0; i < toFetch.length; i += 50) {
+          const chunk = toFetch.slice(i, i + 50);
+          const items = await fetchPlaylists(chunk, apiKey);
+          for (const p of items) {
+            const pid = p.id;
+            const chId = p.snippet && p.snippet.channelId ? p.snippet.channelId : null;
+            playlistCache.set(pid, { channelId: chId, ts: now() });
+          }
+        }
+
+        // gather channel ids
+        const channelIds = Array.from(new Set(ids.map(id => (playlistCache.get(id) || {}).channelId).filter(Boolean)));
+        const channelsToFetch = [];
+        for (const ch of channelIds) {
+          const cached = channelCache.get(ch);
+          if (cached && (now() - cached.ts) <= VIDEO_TTL) continue;
+          channelsToFetch.push(ch);
+        }
+
+        // fetch channels
+        for (let i = 0; i < channelsToFetch.length; i += 50) {
+          const chunk = channelsToFetch.slice(i, i + 50);
+          const chItems = await fetchChannels(chunk, apiKey);
+          for (const ch of chItems) {
+            const cid = ch.id;
+            const country = ch.snippet && ch.snippet.country ? String(ch.snippet.country).trim().toUpperCase() : null;
+            channelCache.set(cid, { country, ts: now() });
+          }
+        }
+
+        for (const id of ids) {
+          const ent = playlistCache.get(id);
+          const chId = ent ? ent.channelId : null;
+          if (!chId) {
+            result[id] = { blocked: false, reason: 'playlist-no-channel' };
+            continue;
+          }
+          const chEntry = channelCache.get(chId);
+          const country = chEntry ? chEntry.country : null;
+          if (!country) {
+            if (blockIfNoCountry) result[id] = { blocked: true, reason: 'blocked-no-country', country: null };
+            else result[id] = { blocked: false, reason: 'channel-no-country' };
+            continue;
+          }
+          const countryCode = String(country).trim().toUpperCase();
+          const isBlocked = blockedList.includes(countryCode);
+          result[id] = { blocked: isBlocked, reason: isBlocked ? 'blocked-country' : 'allowed', country: countryCode };
+        }
+      } catch (err) {
+        console.error('GeoBlocker playlist batch error', err);
+        for (const id of ids) result[id] = { blocked: false, reason: 'error' };
+      }
+
+      sendResponse(result);
+    })();
+    return true;
+  }
 });

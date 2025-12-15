@@ -16,6 +16,8 @@ How it works
 
 - If a channel does not set a `country`, you can now enable the option "Block channels that do not set a country" in Options to block those channels as well.
 
+- The extension now also blocks YouTube playlists (and playlist thumbnails) whose owning channel is in a blocked country. Playlist pages and playlist links are detected and evaluated via the YouTube Data API.
+
 Notes & limitations
 
 - This implementation uses the channel `snippet.country` field. Many channels don't set a country, so not all videos will be identified.
